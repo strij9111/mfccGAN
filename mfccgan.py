@@ -12,15 +12,15 @@ import scipy.io.wavfile
 
 from pystoi import stoi
 from audiomentations import (
-    Compose, 
-    RoomSimulator, 
-    AirAbsorption, 
-    TanhDistortion, 
-    TimeStretch, 
-    PitchShift, 
-    AddGaussianNoise, 
-    Gain, 
-    Shift, 
+    Compose,
+    RoomSimulator,
+    AirAbsorption,
+    TanhDistortion,
+    TimeStretch,
+    PitchShift,
+    AddGaussianNoise,
+    Gain,
+    Shift,
     PolarityInversion
 )
 
@@ -33,10 +33,6 @@ from torch.nn.utils import weight_norm
 import torchaudio
 import yaml
 
-
-data_path = "data\\wavs"
-save_path = 'chkpt'
-load_path = None
 
 MRH_Dict = dict({
     'save_path': 'chkpt',
@@ -60,39 +56,43 @@ MRH_Dict = dict({
 })
 
 main_sample_rate = 32000
-n_mel_channels = 36
-ngf = 32
-n_residual_layers = 3
-ndf = 16
-num_D = 3
-n_layers_D = 4
-downsamp_factor = 4
-lambda_feat = 10
+data_path = "data\\wavs"
 
-batch_size = 256
-seq_len = 8000
-epochs = 3500
-log_interval = 100
-save_interval = 1000
-n_test_samples = 100
+save_path = MRH_Dict['chkpt']
+load_path = MRH_Dict['load_path']
+n_mel_channels = MRH_Dict['n_mel_channels']
+ngf = MRH_Dict['ngf']
+n_residual_layers = MRH_Dict['n_residual_layers']
+ndf = MRH_Dict['ndf']
+num_D = MRH_Dict['num_D']
+n_layers_D = MRH_Dict['n_layers_D']
+downsamp_factor = MRH_Dict['downsamp_factor']
+lambda_feat = MRH_Dict['lambda_feat']
+batch_size = MRH_Dict['batch_size']
+seq_len = MRH_Dict['seq_len']
+epochs = MRH_Dict['epochs']
+log_interval = MRH_Dict['log_interval']
+save_interval = MRH_Dict['save_interval']
+n_test_samples = MRH_Dict['n_test_samples']
 
 
 def pad_to_seq_len(x, seq_len):
     # Получаем текущую длину последовательности
     curr_seq_len = x.shape[-1]
-    
+
     # Вычисляем, сколько нулей нужно добавить
     padding = seq_len - curr_seq_len
-    
+
     if padding > 0:
         # Если нужно добавить нули, используем F.pad
         x = F.pad(x, (0, padding))
     elif padding < 0:
         # Если текущая длина последовательности больше seq_len, обрезаем до seq_len
         x = x[..., :seq_len]
-        
+
     return x
-    
+
+
 def files_to_list(filename):
     """
     Takes a text file of filenames and makes a list of filenames
@@ -102,6 +102,7 @@ def files_to_list(filename):
 
     files = [f.rstrip() for f in files]
     return files
+
 
 filename = Path(data_path) / "training.txt"
 files = files_to_list(filename)
@@ -123,8 +124,8 @@ class AudioDataset(torch.utils.data.Dataset):
         self.segment_length = segment_length
         self.audio_files = files_to_list(training_files)
         self.audio_files = [Path(training_files).parent / x for x in self.audio_files]
-#        random.seed(2201)
-#        random.shuffle(self.audio_files)
+        #        random.seed(2201)
+        #        random.shuffle(self.audio_files)
         self.augment = augment
         if self.augment:
             self.augmentations = Compose([
@@ -132,14 +133,14 @@ class AudioDataset(torch.utils.data.Dataset):
                 PitchShift(min_semitones=-6, max_semitones=6, p=0.1),
                 AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.030, p=0.1),
                 Gain(min_gain_in_db=-3, max_gain_in_db=3, p=0.1),
-#                BandStopFilter(min_bandwidth_fraction=0.01, max_bandwidth_fraction=0.25, p=0.1),
+                #                BandStopFilter(min_bandwidth_fraction=0.01, max_bandwidth_fraction=0.25, p=0.1),
                 PolarityInversion(p=0.1),
                 Shift(min_fraction=-0.1, max_fraction=0.1, p=0.1),
                 AirAbsorption(p=0.4),
                 TanhDistortion(p=0.1),
-#                SevenBandParametricEQ(p=0.3)
+                #                SevenBandParametricEQ(p=0.3)
             ])
-            
+
     def __getitem__(self, index):
         # Read audio
         filename = self.audio_files[index]
@@ -218,6 +219,7 @@ class Audio2Mel(nn.Module):
         log_mel_spec = torch.log10(torch.clamp(mel_output, min=1e-5))
         return log_mel_spec
 
+
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find("Conv") != -1:
@@ -234,6 +236,7 @@ def WNConv1d(*args, **kwargs):
 def WNConvTranspose1d(*args, **kwargs):
     return weight_norm(nn.ConvTranspose1d(*args, **kwargs))
 
+
 class ResnetBlock(nn.Module):
     def __init__(self, dim, dilation=1):
         super().__init__()
@@ -249,8 +252,9 @@ class ResnetBlock(nn.Module):
     def forward(self, x):
         return self.shortcut(x) + self.block(x)
 
+
 """
-Генератор MFCCGAN является полностью сверточной сетью. Стек транспонированных сверточных слоев используется для увеличения
+Генератор MFCCGAN: стек транспонированных сверточных слоев используется для увеличения
 входного MFCC с нижним временным разрешением до сырой речевой волны. За каждым сверточным слоем располагается блок остаточных
 слоев с атрибутом дилатации. Дилатация приводит к большему рецептивному полю входного сигнала, что лучше моделирует вариации
 Увеличение разрешения применяется на четырех этапах: два увеличения разрешения 8x и два увеличения 2x. 
@@ -261,6 +265,8 @@ class ResnetBlock(nn.Module):
 Он начинает со свёртки, затем использует последовательность блоков транспонированной свёртки и резидуальных блоков
 для увеличения размерности данных, и в конце использует свёртку и Tanh активацию для получения звука.
 """
+
+
 class Generator(nn.Module):
     def __init__(self, input_size, ngf, n_residual_layers):
         super().__init__()
@@ -284,14 +290,14 @@ class Generator(nn.Module):
                     stride=r,
                     padding=r // 2 + r % 2,
                     output_padding=r % 2,
-                    ),
+                ),
             ]
-            kernel_size =r * 2
-            stride =r
-            padding =r // 2 + r % 2
+            kernel_size = r * 2
+            stride = r
+            padding = r // 2 + r % 2
             output_padding = r % 2
             MRH_dilation = 1
-            MRH_length =(MRH_in - 1) * stride - 2 * padding + MRH_dilation * (kernel_size - 1) + output_padding + 1
+            MRH_length = (MRH_in - 1) * stride - 2 * padding + MRH_dilation * (kernel_size - 1) + output_padding + 1
             MRH_in = MRH_length
 
             for j in range(n_residual_layers):
@@ -380,6 +386,7 @@ class NLayerDiscriminator(nn.Module):
             results.append(x)
         return results
 
+
 """
 Дискриминатор имеет многоуровневую архитектуру, содержащую три идентичных дискриминатора,
 которые работают на разных аудиошкалах (частотах дискретизации).
@@ -387,6 +394,8 @@ class NLayerDiscriminator(nn.Module):
 Поведение более высокой частоты больше проявляется на более высоких шкалах, в то время как более низкая частота дискретизации
 может отражать поведение низкой частоты. Таким образом, масштабирование выходного сигнала на три уровня может привести к лучшему суждению о качестве.
 """
+
+
 class Discriminator(nn.Module):
     def __init__(self, num_D, ndf, n_layers, downsampling_factor):
         super().__init__()
@@ -405,6 +414,7 @@ class Discriminator(nn.Module):
             results.append(disc(x))
             x = self.downsample(x)
         return results
+
 
 def save_sample(file_path, sampling_rate, audio):
     """Helper function to save sample
@@ -425,9 +435,7 @@ class Audio2MFCC(nn.Module):
             hop_length=256,
             win_length=1024,
             sampling_rate=main_sample_rate,
-            n_mel_channels=36,
-            mel_fmin=0.0,
-            mel_fmax=None,
+            n_mel_channels=36
     ):
         super().__init__()
 
@@ -573,10 +581,11 @@ def main():
             orig_sig = torch.flatten(x_t)
             pred_sig = torch.flatten(pred)
 
-            mystoi = stoi(orig_sig.detach().cpu().numpy().astype('float32'), pred_sig.detach().cpu().numpy().astype('float32'), main_sample_rate,
+            mystoi = stoi(orig_sig.detach().cpu().numpy().astype('float32'),
+                          pred_sig.detach().cpu().numpy().astype('float32'), main_sample_rate,
                           extended=False)
 
-# ToDo: удалить
+            # ToDo: удалить
             for i in range(batch_num):
                 orig1 = orig[i, 0, :]
                 pred1 = pred[i, 0, :]
