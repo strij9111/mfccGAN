@@ -1,0 +1,9 @@
+librosa==0.10.0.post2
+numpy==1.24.3
+scipy==1.11.0
+pystoi==0.3.3
+audiomentations==0.31.0
+torch==2.0.1+cu118
+torchaudio==2.0.2+cu118
+tensorboard==2.13.0
+pyyaml==6.0

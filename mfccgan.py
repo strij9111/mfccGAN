@@ -5,13 +5,24 @@ import time
 from pathlib import Path
 
 import librosa
-from librosa.core import load
 from librosa.filters import mel as librosa_mel_fn
 from librosa.util import normalize
 import numpy as np
 import scipy.io.wavfile
 
 from pystoi import stoi
+from audiomentations import (
+    Compose, 
+    RoomSimulator, 
+    AirAbsorption, 
+    TanhDistortion, 
+    TimeStretch, 
+    PitchShift, 
+    AddGaussianNoise, 
+    Gain, 
+    Shift, 
+    PolarityInversion
+)
 
 import torch
 import torch.nn as nn
@@ -19,11 +30,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.utils import weight_norm
+import torchaudio
 import yaml
 
 
-data_path ='/home/behdad/MB_Speech01.11.09/Datasets/LJSpeech-1.1/wavs/'
-save_path = '/media/behdad/76c865bc-69a9-4151-b7c1-c8463b4fc43b/mb/Datasets/MFCCGAN/MRHlogs13/MRH-Baseline/'
+data_path = "data\\wavs"
+save_path = 'chkpt'
 load_path = None
 
 n_mel_channels = 36
@@ -35,13 +47,30 @@ n_layers_D = 4
 downsamp_factor = 4
 lambda_feat = 10
 
-batch_size = 16
-seq_len = 8192
+batch_size = 64
+seq_len = 32000
 epochs = 3500
 log_interval = 100
-save_interval = 40650
+save_interval = 10000
 n_test_samples = 100
 
+
+def pad_to_seq_len(x, seq_len):
+    # Получаем текущую длину последовательности
+    curr_seq_len = x.shape[-1]
+    
+    # Вычисляем, сколько нулей нужно добавить
+    padding = seq_len - curr_seq_len
+    
+    if padding > 0:
+        # Если нужно добавить нули, используем F.pad
+        x = F.pad(x, (0, padding))
+    elif padding < 0:
+        # Если текущая длина последовательности больше seq_len, обрезаем до seq_len
+        x = x[..., :seq_len]
+        
+    return x
+    
 def files_to_list(filename):
     """
     Takes a text file of filenames and makes a list of filenames
@@ -52,7 +81,7 @@ def files_to_list(filename):
     files = [f.rstrip() for f in files]
     return files
 
-filename =Path(data_path) / "train_files.txt"
+filename = Path(data_path) / "training.txt"
 files = files_to_list(filename)
 
 audio_files = [filename.parent / x for x in files]
@@ -72,26 +101,39 @@ class AudioDataset(torch.utils.data.Dataset):
         self.segment_length = segment_length
         self.audio_files = files_to_list(training_files)
         self.audio_files = [Path(training_files).parent / x for x in self.audio_files]
-        random.seed(2201)
-        random.shuffle(self.audio_files)
+#        random.seed(2201)
+#        random.shuffle(self.audio_files)
         self.augment = augment
-
+        if self.augment:
+            self.augmentations = Compose([
+                TimeStretch(min_rate=0.8, max_rate=1.2, p=0.1),
+                PitchShift(min_semitones=-6, max_semitones=6, p=0.1),
+                AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.030, p=0.1),
+                Gain(min_gain_in_db=-3, max_gain_in_db=3, p=0.1),
+#                BandStopFilter(min_bandwidth_fraction=0.01, max_bandwidth_fraction=0.25, p=0.1),
+                PolarityInversion(p=0.1),
+                Shift(min_fraction=-0.1, max_fraction=0.1, p=0.1),
+                AirAbsorption(p=0.4),
+                TanhDistortion(p=0.1),
+#                SevenBandParametricEQ(p=0.3)
+            ])
+            
     def __getitem__(self, index):
         # Read audio
         filename = self.audio_files[index]
         audio, sampling_rate = self.load_wav_to_torch(filename)
         # Take segment
-        if audio.size(0) >= self.segment_length:
-            max_audio_start = audio.size(0) - self.segment_length
-            audio_start = random.randint(0, max_audio_start)
-            audio = audio[audio_start : audio_start + self.segment_length]
-        else:
-            audio = F.pad(
-                audio, (0, self.segment_length - audio.size(0)), "constant"
-            ).data
 
-        # audio = audio / 32768.0
-        return audio.unsqueeze(0)
+        if audio.shape[1] > self.segment_length:
+            # Если длина аудио больше segment_length, выбираем произвольный отрывок
+            start = torch.randint(0, audio.shape[1] - self.segment_length, (1,)).item()
+            return audio[:, start: start + self.segment_length]
+        else:
+            # Если длина аудио меньше segment_length, дополняем нулями
+            padding = torch.zeros((audio.shape[0], self.segment_length - audio.shape[1])).to(audio.device)
+            return torch.cat((audio, padding), dim=1)
+
+        return audio
 
     def __len__(self):
         return len(self.audio_files)
@@ -100,14 +142,13 @@ class AudioDataset(torch.utils.data.Dataset):
         """
         Loads wavdata into torch array
         """
-        data, sampling_rate = load(full_path, sr=self.sampling_rate)
-        data = 0.95 * normalize(data)
+        data, sample_rate = torchaudio.load(full_path)
 
         if self.augment:
-            amplitude = np.random.uniform(low=0.3, high=1.0)
-            data = data * amplitude
+            data = self.augmentations(samples=data.numpy(), sample_rate=self.sampling_rate)
+            data = torch.from_numpy(data)
 
-        return torch.from_numpy(data).float(), sampling_rate
+        return data, sample_rate
 
 
 class Audio2Mel(nn.Module):
@@ -116,7 +157,7 @@ class Audio2Mel(nn.Module):
             n_fft=1024,
             hop_length=256,
             win_length=1024,
-            sampling_rate=22050,
+            sampling_rate=32000,
             n_mel_channels=36,
             mel_fmin=0.0,
             mel_fmax=None,
@@ -199,13 +240,12 @@ class Generator(nn.Module):
         mult = int(2 ** len(ratios))
 
         model = [
-            nn.ReflectionPad1d(3),
+            nn.ReflectionPad1d(2),
             WNConv1d(input_size, mult * ngf, kernel_size=7, padding=0),
         ]
         MRH_in = 32
         # Upsample to raw audio scale
         for i, r in enumerate(ratios):
-            # print('mult= ',mult)
             model += [
                 nn.LeakyReLU(0.2),
                 WNConvTranspose1d(
@@ -220,9 +260,9 @@ class Generator(nn.Module):
             kernel_size =r * 2
             stride =r
             padding =r // 2 + r % 2
-            output_padding =r % 2
-            MRH_dilation =1
-            MRH_length =(MRH_in -1 ) * stride - 2 * padding + MRH_dilation * (kernel_size - 1) + output_padding + 1
+            output_padding = r % 2
+            MRH_dilation = 1
+            MRH_length =(MRH_in - 1) * stride - 2 * padding + MRH_dilation * (kernel_size - 1) + output_padding + 1
             MRH_in = MRH_length
 
             for j in range(n_residual_layers):
@@ -241,6 +281,7 @@ class Generator(nn.Module):
         self.apply(weights_init)
 
     def forward(self, x):
+        x = x.squeeze()
         return self.model(x)
 
 
@@ -335,7 +376,7 @@ def save_sample(file_path, sampling_rate, audio):
 
     Args:
         file_path (str or pathlib.Path): save file path
-        sampling_rate (int): sampling rate of audio (usually 22050)
+        sampling_rate (int): sampling rate of audio (usually 32000)
         audio (torch.FloatTensor): torch array containing audio in [-1, 1]
     """
     audio = (audio.numpy() * 32768).astype("int16")
@@ -348,12 +389,13 @@ class Audio2MFCC(nn.Module):
             n_fft=1024,
             hop_length=256,
             win_length=1024,
-            sampling_rate=22050,
+            sampling_rate=32000,
             n_mel_channels=36,
             mel_fmin=0.0,
             mel_fmax=None,
     ):
         super().__init__()
+
         ##############################################
         # FFT Parameters                              #
         ##############################################
@@ -363,28 +405,24 @@ class Audio2MFCC(nn.Module):
         self.sampling_rate = sampling_rate
         self.n_mel_channels = n_mel_channels
 
+        # MFCC transformer
+        self.mfcc_transform = torchaudio.transforms.MFCC(
+            sample_rate=self.sampling_rate,
+            n_mfcc=self.n_mel_channels,
+            melkwargs={
+                'n_fft': self.n_fft,
+                'hop_length': self.hop_length,
+                'win_length': self.win_length,
+            }
+        )
+
     def forward(self, x):
-        y = x[0, :, :]
-        z = y.cpu().numpy()
-        w = z.reshape(x.size(2), )
-        mfccs = librosa.feature.mfcc(w, sr=self.sampling_rate, n_mfcc=36, n_fft=1024, hop_length=258, win_length=1024)
-        frame_number = mfccs.shape[1]
-        t = torch.randn(x.size(0), self.n_mel_channels, frame_number)
+        mfccs = self.mfcc_transform(x.cuda())
+        return mfccs
 
-        for i in np.arange(x.size(0)):
-            y = x[i, :, :]
-            z = y.cpu().numpy()
-            w = z.reshape(x.size(2), )
-            mfccs = librosa.feature.mfcc(w, sr=self.sampling_rate, n_mfcc=36, n_fft=1024, hop_length=258,
-                                         win_length=1024)
-
-            Q = torch.tensor(mfccs)
-            t[i, :, :] = Q
-
-        return t
 
 MRH_Dict = dict({
-    'save_path': 'MRHlogs13/MRH-Baseline',
+    'save_path': 'chkpt',
     'load_path': None,
     'n_mel_channels': 36,
     'ngf': 32,
@@ -396,17 +434,17 @@ MRH_Dict = dict({
     'lambda_feat': 10,
 
     'data_path': 'wavs/',
-    'batch_size': 16,
-    'seq_len': 8192,
+    'batch_size': 64,
+    'seq_len': 32000,
     'epochs': 1200,
     'log_interval': 100,
-    'save_interval': 81300,
+    'save_interval': 5000,
     'n_test_samples': 1
 })
 
 def main():
     root = Path(save_path)
-    load_root = Path(load_path) if load_path else None  # >>>>> 14000422
+    load_root = Path(load_path) if load_path else None
     root.mkdir(parents=True, exist_ok=True)
 
     ####################################
@@ -422,7 +460,7 @@ def main():
     netG = Generator(n_mel_channels, ngf, n_residual_layers).cuda()
     netD = Discriminator(num_D, ndf, n_layers_D, downsamp_factor).cuda()
 
-    hop_length = 257
+    hop_length = 256
     myMFCC = Audio2MFCC(n_mel_channels=n_mel_channels, hop_length=hop_length).cuda()
 
     #####################
@@ -441,16 +479,16 @@ def main():
     # Create data loaders #
     #######################
     train_set = AudioDataset(
-        Path(data_path) / "train_files.txt", seq_len, sampling_rate=22050
+        Path(data_path) / "training.txt", seq_len, sampling_rate=32000
     )
     test_set = AudioDataset(
-        Path(data_path) / "test_files.txt",
-        22050 * 4,
-        sampling_rate=22050,
+        Path(data_path) / "validation.txt",
+        seq_len,
+        sampling_rate=32000,
         augment=False,
     )
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=4)
+    train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=1)
     test_loader = DataLoader(test_set, batch_size=1)
 
     print('##################')
@@ -467,10 +505,8 @@ def main():
         test_audio.append(x_t)
 
         audio = x_t.squeeze().cpu()
-        save_sample(root / ("original_%d.wav" % i), 22050, audio)
-        writer.add_audio("original/sample_%d.wav" % i, audio, 0, sample_rate=22050)
-        #
-        # print("Producing an original wav file:" , root/ ("original_%d.wav" % i))
+        save_sample(root / ("original_%d.wav" % i), 32000, audio)
+        writer.add_audio("original/sample_%d.wav" % i, audio, 0, sample_rate=32000)
 
         if i == n_test_samples - 1:
             break
@@ -484,10 +520,9 @@ def main():
     best_mel_reconst = 1000000
     steps = 0
 
-    print("\nTraining 36MFCCGAN by LSGAN with stoi Percep.Opt: 01.11.02")
-    print('%%%%%%%%%%%%%%%%%%%%%%%')
+    print("\nTraining")
     for epoch in range(1, epochs + 1):
-        print('epoch== ', epoch)
+        print('Epoch ', epoch)
         mystoi = 0
         mystoi_mean = 0
         mcd_score = 0
@@ -495,44 +530,42 @@ def main():
 
         for iterno, x_t in enumerate(train_loader):
             s_t = myMFCC(x_t).detach()
-            s_t = s_t.cuda()
-            x_pred_t = netG(s_t.cuda())
+            x_pred_t = netG(s_t)
 
             with torch.no_grad():
+                x_pred_t = pad_to_seq_len(x_pred_t, seq_len)
                 s_pred_t = myMFCC(x_pred_t.detach())
-                s_pred_t = s_pred_t.cuda()
                 s_error = F.l1_loss(s_t, s_pred_t).item()
 
             #######################
             # Train Discriminator #
             #######################
-            ###
 
             scaler = 10.0 / np.log(10.0) * np.sqrt(2)
             distortion = (s_t - s_pred_t)[:, 1:, :]
             mcd = distortion.pow(2.0).sum(dim=-1).sqrt().mean(dim=-1) * scaler
 
-            x1 = mcd.detach().cpu()
+            x1 = mcd.detach()
 
             mcd_mean = x1.mean()
             mcd_max = 1000
             mcd_score = abs(mcd_max - mcd_mean) / mcd_max
 
             orig = x_t.detach()
-            pred = x_pred_t.detach().cpu()
+            pred = x_pred_t.detach()
             batch_num = orig.shape[0]
 
             orig_sig = torch.flatten(x_t)
             pred_sig = torch.flatten(pred)
 
-            mystoi = stoi(orig_sig, pred_sig, 22050,
+            mystoi = stoi(orig_sig.detach().cpu().numpy().astype('float32'), pred_sig.detach().cpu().numpy().astype('float32'), 32000,
                           extended=False)
 
             for i in range(batch_num):
                 orig1 = orig[i, 0, :]
                 pred1 = pred[i, 0, :]
 
-            D_fake_det = netD(x_pred_t.cuda().detach())
+            D_fake_det = netD(x_pred_t.detach())
             D_real = netD(x_t.cuda())
 
             loss_D = 0
@@ -540,7 +573,7 @@ def main():
                 loss_D += ((mystoi - scale[-1]) ** 2).mean()
 
             for scale in D_real:
-                loss_D += ((1 - scale[-1]) ** 2).mean()  # ***************************************
+                loss_D += ((1 - scale[-1]) ** 2).mean()
 
             netD.zero_grad()
             loss_D.backward()
@@ -553,7 +586,7 @@ def main():
 
             loss_G = 0
             for scale in D_fake:
-                loss_G += ((1 - scale[-1]) ** 2).mean()  # *************************************
+                loss_G += ((1 - scale[-1]) ** 2).mean()
 
             loss_feat = 0
             feat_weights = 4.0 / (n_layers_D + 1)
@@ -584,12 +617,12 @@ def main():
                     for i, (voc, _) in enumerate(zip(test_voc, test_audio)):
                         pred_audio = netG(voc)
                         pred_audio = pred_audio.squeeze().cpu()
-                        save_sample(root / ("generated_%d.wav" % i), 22050, pred_audio)
+                        save_sample(root / ("generated_%d.wav" % i), 32000, pred_audio)
                         writer.add_audio(
                             "generated/sample_%d.wav" % i,
                             pred_audio,
                             epoch,
-                            sample_rate=22050,
+                            sample_rate=32000,
                         )
 
                 torch.save(netG.state_dict(), root / "netG.pt")
