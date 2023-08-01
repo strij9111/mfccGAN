@@ -555,7 +555,8 @@ def main():
             #######################
 
             scaler = 10.0 / np.log(10.0) * np.sqrt(2)
-            distortion = (s_t - s_pred_t)[:, 1:, :]
+            distortion = s_t - s_pred_t
+
             mcd = distortion.pow(2.0).sum(dim=-1).sqrt().mean(dim=-1) * scaler
 
             x1 = mcd.detach()
