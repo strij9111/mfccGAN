@@ -38,6 +38,28 @@ data_path = "data\\wavs"
 save_path = 'chkpt'
 load_path = None
 
+MRH_Dict = dict({
+    'save_path': 'chkpt',
+    'load_path': None,
+    'n_mel_channels': 36,
+    'ngf': 32,
+    'n_residual_layers': 3,
+    'ndf': 16,
+    'num_D': 3,
+    'n_layers_D': 4,
+    'downsamp_factor': 4,
+    'lambda_feat': 10,
+
+    'data_path': 'wavs/',
+    'batch_size': 256,
+    'seq_len': 8000,
+    'epochs': 1200,
+    'log_interval': 100,
+    'save_interval': 1000,
+    'n_test_samples': 1
+})
+
+main_sample_rate = 32000
 n_mel_channels = 36
 ngf = 32
 n_residual_layers = 3
@@ -47,8 +69,8 @@ n_layers_D = 4
 downsamp_factor = 4
 lambda_feat = 10
 
-batch_size = 64
-seq_len = 32000
+batch_size = 256
+seq_len = 8000
 epochs = 3500
 log_interval = 100
 save_interval = 1000
@@ -157,7 +179,7 @@ class Audio2Mel(nn.Module):
             n_fft=1024,
             hop_length=256,
             win_length=1024,
-            sampling_rate=32000,
+            sampling_rate=main_sample_rate,
             n_mel_channels=36,
             mel_fmin=0.0,
             mel_fmax=None,
@@ -402,7 +424,7 @@ class Audio2MFCC(nn.Module):
             n_fft=1024,
             hop_length=256,
             win_length=1024,
-            sampling_rate=32000,
+            sampling_rate=main_sample_rate,
             n_mel_channels=36,
             mel_fmin=0.0,
             mel_fmax=None,
@@ -433,27 +455,6 @@ class Audio2MFCC(nn.Module):
         mfccs = self.mfcc_transform(x.cuda())
         return mfccs
 
-
-MRH_Dict = dict({
-    'save_path': 'chkpt',
-    'load_path': None,
-    'n_mel_channels': 36,
-    'ngf': 32,
-    'n_residual_layers': 3,
-    'ndf': 16,
-    'num_D': 3,
-    'n_layers_D': 4,
-    'downsamp_factor': 4,
-    'lambda_feat': 10,
-
-    'data_path': 'wavs/',
-    'batch_size': 64,
-    'seq_len': 32000,
-    'epochs': 1200,
-    'log_interval': 100,
-    'save_interval': 1000,
-    'n_test_samples': 1
-})
 
 def main():
     root = Path(save_path)
@@ -492,12 +493,12 @@ def main():
     # Create data loaders #
     #######################
     train_set = AudioDataset(
-        Path(data_path) / "training.txt", seq_len, sampling_rate=32000
+        Path(data_path) / "training.txt", seq_len, sampling_rate=main_sample_rate
     )
     test_set = AudioDataset(
         Path(data_path) / "validation.txt",
         seq_len,
-        sampling_rate=32000,
+        sampling_rate=main_sample_rate,
         augment=False,
     )
 
@@ -518,8 +519,8 @@ def main():
         test_audio.append(x_t)
 
         audio = x_t.squeeze().cpu()
-        save_sample(root / ("original_%d.wav" % i), 32000, audio)
-        writer.add_audio("original/sample_%d.wav" % i, audio, 0, sample_rate=32000)
+        save_sample(root / ("original_%d.wav" % i), main_sample_rate, audio)
+        writer.add_audio("original/sample_%d.wav" % i, audio, 0, sample_rate=main_sample_rate)
 
         if i == n_test_samples - 1:
             break
@@ -572,9 +573,10 @@ def main():
             orig_sig = torch.flatten(x_t)
             pred_sig = torch.flatten(pred)
 
-            mystoi = stoi(orig_sig.detach().cpu().numpy().astype('float32'), pred_sig.detach().cpu().numpy().astype('float32'), 32000,
+            mystoi = stoi(orig_sig.detach().cpu().numpy().astype('float32'), pred_sig.detach().cpu().numpy().astype('float32'), main_sample_rate,
                           extended=False)
 
+# ToDo: удалить
             for i in range(batch_num):
                 orig1 = orig[i, 0, :]
                 pred1 = pred[i, 0, :]
@@ -631,12 +633,12 @@ def main():
                     for i, (voc, _) in enumerate(zip(test_voc, test_audio)):
                         pred_audio = netG(voc)
                         pred_audio = pred_audio.squeeze().cpu()
-                        save_sample(root / ("generated_%d.wav" % i), 32000, pred_audio)
+                        save_sample(root / ("generated_%d.wav" % i), main_sample_rate, pred_audio)
                         writer.add_audio(
                             "generated/sample_%d.wav" % i,
                             pred_audio,
                             epoch,
-                            sample_rate=32000,
+                            sample_rate=main_sample_rate,
                         )
 
                 torch.save(netG.state_dict(), root / "netG.pt")
@@ -654,7 +656,7 @@ def main():
                 print("-" * 100)
             mystoi1 = round(mystoi, 3)
             if steps % log_interval == 0:
-                print("mystoi:", mystoi1, "mcd_score:", mcd_score,
+                print("mystoi:", mystoi1, "mcd_score:", mcd_score.item(),
                       "Epoch {} | Iters {} / {} | ms/batch {:5.2f} | loss {}".format(
                           epoch,
                           iterno,
