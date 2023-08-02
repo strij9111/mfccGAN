@@ -58,6 +58,7 @@ MRH_Dict = dict({
 
 main_sample_rate = 32000
 data_path = "data\\wavs"
+main_hop_length = 64
 
 save_path = MRH_Dict['chkpt']
 load_path = MRH_Dict['load_path']
@@ -125,8 +126,9 @@ class AudioDataset(torch.utils.data.Dataset):
         self.segment_length = segment_length
         self.audio_files = files_to_list(training_files)
         self.audio_files = [Path(training_files).parent / x for x in self.audio_files]
-        #        random.seed(2201)
-        #        random.shuffle(self.audio_files)
+
+        random.shuffle(self.audio_files)
+
         self.augment = augment
         if self.augment:
             self.augmentations = Compose([
@@ -157,8 +159,6 @@ class AudioDataset(torch.utils.data.Dataset):
             padding = torch.zeros((audio.shape[0], self.segment_length - audio.shape[1])).to(audio.device)
             return torch.cat((audio, padding), dim=1)
 
-        return audio
-
     def __len__(self):
         return len(self.audio_files)
 
@@ -179,7 +179,7 @@ class Audio2Mel(nn.Module):
     def __init__(
             self,
             n_fft=1024,
-            hop_length=256,
+            hop_length=main_hop_length,
             win_length=1024,
             sampling_rate=main_sample_rate,
             n_mel_channels=36,
@@ -429,7 +429,7 @@ class Audio2MFCC(nn.Module):
     def __init__(
             self,
             n_fft=1024,
-            hop_length=256,
+            hop_length=main_hop_length,
             win_length=1024,
             sampling_rate=main_sample_rate,
             n_mel_channels=36
@@ -479,8 +479,7 @@ def main():
     netG = Generator(n_mel_channels, ngf, n_residual_layers).cuda()
     netD = Discriminator(num_D, ndf, n_layers_D, downsamp_factor).cuda()
 
-    hop_length = 256
-    myMFCC = Audio2MFCC(n_mel_channels=n_mel_channels, hop_length=hop_length).cuda()
+    myMFCC = Audio2MFCC(n_mel_channels=n_mel_channels, hop_length=main_hop_length).cuda()
 
     #####################
     # Create optimizers #
