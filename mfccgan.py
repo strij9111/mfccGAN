@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.utils import weight_norm
 import torchaudio
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import yaml
 
 
@@ -487,6 +488,8 @@ def main():
     optG = torch.optim.Adam(netG.parameters(), lr=1e-4, betas=(0.5, 0.9))
     optD = torch.optim.Adam(netD.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
+    schedulerG = CosineAnnealingLR(optimizer, T_max=50, eta_min=0)
+
     if load_root and load_root.exists():
         netG.load_state_dict(torch.load(load_root / "netG.pt"))
         optG.load_state_dict(torch.load(load_root / "optG.pt"))
@@ -611,6 +614,7 @@ def main():
             netG.zero_grad()
             (loss_G + lambda_feat * loss_feat).backward()
             optG.step()
+            schedulerG.step()
 
             ######################
             # Update tensorboard #
