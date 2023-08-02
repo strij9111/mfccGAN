@@ -48,19 +48,19 @@ MRH_Dict = dict({
     'lambda_feat': 10,
 
     'data_path': 'wavs/',
-    'batch_size': 256,
+    'batch_size': 32,
     'seq_len': 8000,
     'epochs': 1200,
     'log_interval': 100,
     'save_interval': 1000,
-    'n_test_samples': 1
+    'n_test_samples': 100
 })
 
 main_sample_rate = 32000
 data_path = "data\\wavs"
 main_hop_length = 64
 
-save_path = MRH_Dict['chkpt']
+save_path = MRH_Dict['save_path']
 load_path = MRH_Dict['load_path']
 n_mel_channels = MRH_Dict['n_mel_channels']
 ngf = MRH_Dict['ngf']
@@ -487,7 +487,7 @@ def main():
     optG = torch.optim.Adam(netG.parameters(), lr=1e-4, betas=(0.5, 0.9))
     optD = torch.optim.Adam(netD.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
-    schedulerG = CosineAnnealingLR(optimizer, T_max=50, eta_min=0)
+    schedulerG = CosineAnnealingLR(optG, T_max=50, eta_min=0)
 
     if load_root and load_root.exists():
         netG.load_state_dict(torch.load(load_root / "netG.pt"))
