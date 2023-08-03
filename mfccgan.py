@@ -381,7 +381,7 @@ class Audio2MFCC(nn.Module):
             hop_length=main_hop_length,
             win_length=1024,
             sampling_rate=main_sample_rate,
-            n_mel_channels=36
+            n_mel_channels=n_mel_channels
     ):
         super().__init__()
 
