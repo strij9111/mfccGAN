@@ -60,6 +60,7 @@ MRH_Dict = dict({
 })
 
 main_sample_rate = 22050
+orig_sample_rate = 32000
 main_hop_length = 258
 
 data_path = MRH_Dict['data_path']
@@ -129,19 +130,19 @@ class AudioDataset(torch.utils.data.Dataset):
         self.segment_length = segment_length
         self.audio_files = files_to_list(training_files)
         self.audio_files = [Path(training_files).parent / x for x in self.audio_files]
-        self.resampler = torchaudio.transforms.Resample(orig_freq=32000, new_freq=16000)
+        self.resampler = torchaudio.transforms.Resample(orig_freq=orig_sample_rate, new_freq=main_sample_rate)
         random.shuffle(self.audio_files)
 
         self.augment = augment
         if self.augment:
             self.augmentations = Compose([
-                TimeStretch(min_rate=0.8, max_rate=1.2, p=0.1),
+#                TimeStretch(min_rate=0.8, max_rate=1.2, p=0.1),
                 PitchShift(min_semitones=-6, max_semitones=6, p=0.1),
                 AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.030, p=0.1),
                 Gain(min_gain_in_db=-3, max_gain_in_db=3, p=0.1),
                 #                BandStopFilter(min_bandwidth_fraction=0.01, max_bandwidth_fraction=0.25, p=0.1),
-                PolarityInversion(p=0.1),
-                Shift(min_fraction=-0.1, max_fraction=0.1, p=0.1),
+#                PolarityInversion(p=0.1),
+#                Shift(min_fraction=-0.1, max_fraction=0.1, p=0.1),
                 AirAbsorption(p=0.4),
                 TanhDistortion(p=0.1),
                 #                SevenBandParametricEQ(p=0.3)
@@ -177,56 +178,7 @@ class AudioDataset(torch.utils.data.Dataset):
             data = self.augmentations(samples=data.numpy(), sample_rate=self.sampling_rate)
             data = torch.from_numpy(data)
 
-        return data, 16000
-
-
-class Audio2Mel(nn.Module):
-    def __init__(
-            self,
-            n_fft=1024,
-            hop_length=main_hop_length,
-            win_length=1024,
-            sampling_rate=main_sample_rate,
-            n_mel_channels=36,
-            mel_fmin=0.0,
-            mel_fmax=None,
-    ):
-        super().__init__()
-        ##############################################
-        # FFT Parameters                              #
-        ##############################################
-        window = torch.hann_window(win_length).float()
-        mel_basis = librosa_mel_fn(
-            sampling_rate, n_fft, n_mel_channels, mel_fmin, mel_fmax
-        )
-        mel_basis = torch.from_numpy(mel_basis).float()
-        self.register_buffer("mel_basis", mel_basis)
-        self.register_buffer("window", window)
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.win_length = win_length
-        self.sampling_rate = sampling_rate
-        self.n_mel_channels = n_mel_channels
-
-    def forward(self, audio):
-        if len(audio.shape) > 2:
-            audio = audio.squeeze(0)
-        p = (self.n_fft - self.hop_length) // 2
-        audio = F.pad(audio, (p, p), "reflect").squeeze(1)
-        fft = torch.stft(
-            audio,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-            window=self.window,
-            center=False,
-        )
-        real_part, imag_part = fft.unbind(-1)
-        magnitude = torch.sqrt(real_part ** 2 + imag_part ** 2)
-        mel_output = torch.matmul(self.mel_basis, magnitude)
-        log_mel_spec = torch.log10(torch.clamp(mel_output, min=1e-5))
-        return log_mel_spec
-
+        return data, main_sample_rate
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -269,8 +221,6 @@ class ResnetBlock(nn.Module):
 На каждом этапе применяется оператор транспонированной свертки 1D для увеличения разрешения. 
 Остаточные стеки не меняют размер входного сигнала. Каждый остаточный стек состоит из трех сверточных слоев с различными параметрами дилатации.
 """
-
-
 class Generator(nn.Module):
     def __init__(self, input_size, ngf, n_residual_layers):
         super().__init__()
@@ -398,8 +348,6 @@ class NLayerDiscriminator(nn.Module):
 Поведение более высокой частоты больше проявляется на более высоких шкалах, в то время как более низкая частота дискретизации
 может отражать поведение низкой частоты. Таким образом, масштабирование выходного сигнала на три уровня может привести к лучшему суждению о качестве.
 """
-
-
 class Discriminator(nn.Module):
     def __init__(self, num_D, ndf, n_layers, downsampling_factor):
         super().__init__()
@@ -490,7 +438,7 @@ def main():
     optG = torch.optim.Adam(netG.parameters(), lr=1e-4, betas=(0.5, 0.9))
     optD = torch.optim.Adam(netD.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
-#    schedulerG = CosineAnnealingLR(optG, T_max=50, eta_min=0)
+    schedulerG = CosineAnnealingLR(optG, T_max=50, eta_min=0)
 
     if load_root and load_root.exists():
         netG.load_state_dict(torch.load(load_root / "netG.pt"))
@@ -619,7 +567,7 @@ def main():
             netG.zero_grad()
             (loss_G + lambda_feat * loss_feat).backward()
             optG.step()
-#            schedulerG.step()
+            schedulerG.step()
 
             ######################
             # Update tensorboard #
