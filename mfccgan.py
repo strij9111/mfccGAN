@@ -2,6 +2,7 @@ import argparse
 import math
 import random
 import time
+import os
 from pathlib import Path
 
 import librosa
@@ -35,6 +36,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import yaml
 
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+
 MRH_Dict = dict({
     'save_path': 'chkpt',
     'load_path': None,
@@ -47,19 +50,19 @@ MRH_Dict = dict({
     'downsamp_factor': 4,
     'lambda_feat': 10,
 
-    'data_path': 'wavs/',
-    'batch_size': 32,
-    'seq_len': 8000,
+    'data_path': "data\\wavs",
+    'batch_size': 128,
+    'seq_len': 8192,
     'epochs': 1200,
     'log_interval': 100,
     'save_interval': 1000,
     'n_test_samples': 100
 })
 
-main_sample_rate = 32000
-data_path = "data\\wavs"
-main_hop_length = 64
+main_sample_rate = 22050
+main_hop_length = 258
 
+data_path = MRH_Dict['data_path']
 save_path = MRH_Dict['save_path']
 load_path = MRH_Dict['load_path']
 n_mel_channels = MRH_Dict['n_mel_channels']
@@ -126,7 +129,7 @@ class AudioDataset(torch.utils.data.Dataset):
         self.segment_length = segment_length
         self.audio_files = files_to_list(training_files)
         self.audio_files = [Path(training_files).parent / x for x in self.audio_files]
-
+        self.resampler = torchaudio.transforms.Resample(orig_freq=32000, new_freq=16000)
         random.shuffle(self.audio_files)
 
         self.augment = augment
@@ -149,7 +152,7 @@ class AudioDataset(torch.utils.data.Dataset):
         filename = self.audio_files[index]
         audio, sampling_rate = self.load_wav_to_torch(filename)
         # Take segment
-
+        
         if audio.shape[1] > self.segment_length:
             # Если длина аудио больше segment_length, выбираем произвольный отрывок
             start = torch.randint(0, audio.shape[1] - self.segment_length, (1,)).item()
@@ -168,11 +171,13 @@ class AudioDataset(torch.utils.data.Dataset):
         """
         data, sample_rate = torchaudio.load(full_path)
 
+        # Применение ресемплинга
+        data = self.resampler(data)
         if self.augment:
             data = self.augmentations(samples=data.numpy(), sample_rate=self.sampling_rate)
             data = torch.from_numpy(data)
 
-        return data, sample_rate
+        return data, 16000
 
 
 class Audio2Mel(nn.Module):
@@ -204,6 +209,8 @@ class Audio2Mel(nn.Module):
         self.n_mel_channels = n_mel_channels
 
     def forward(self, audio):
+        if len(audio.shape) > 2:
+            audio = audio.squeeze(0)
         p = (self.n_fft - self.hop_length) // 2
         audio = F.pad(audio, (p, p), "reflect").squeeze(1)
         fft = torch.stft(
@@ -414,15 +421,9 @@ class Discriminator(nn.Module):
 
 
 def save_sample(file_path, sampling_rate, audio):
-    """Helper function to save sample
-
-    Args:
-        file_path (str or pathlib.Path): save file path
-        sampling_rate (int): sampling rate of audio (usually 32000)
-        audio (torch.FloatTensor): torch array containing audio in [-1, 1]
-    """
-    audio = (audio.numpy() * 32768).astype("int16")
-    scipy.io.wavfile.write(file_path, sampling_rate, audio)
+    if len(audio.shape) > 2:
+        audio = audio.squeeze(0)
+    torchaudio.save(file_path, audio.cpu(), sample_rate=sampling_rate)
 
 
 class Audio2MFCC(nn.Module):
@@ -458,6 +459,8 @@ class Audio2MFCC(nn.Module):
 
     def forward(self, x):
         mfccs = self.mfcc_transform(x.cuda())
+        if len(mfccs.shape) > 3:
+            mfccs = mfccs.squeeze()
         return mfccs
 
 
@@ -487,13 +490,14 @@ def main():
     optG = torch.optim.Adam(netG.parameters(), lr=1e-4, betas=(0.5, 0.9))
     optD = torch.optim.Adam(netD.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
-    schedulerG = CosineAnnealingLR(optG, T_max=50, eta_min=0)
+#    schedulerG = CosineAnnealingLR(optG, T_max=50, eta_min=0)
 
     if load_root and load_root.exists():
         netG.load_state_dict(torch.load(load_root / "netG.pt"))
         optG.load_state_dict(torch.load(load_root / "optG.pt"))
         netD.load_state_dict(torch.load(load_root / "netD.pt"))
         optD.load_state_dict(torch.load(load_root / "optD.pt"))
+        print("Loaded")
 
     #######################
     # Create data loaders #
@@ -524,9 +528,9 @@ def main():
         test_voc.append(s_t.cuda())
         test_audio.append(x_t)
 
-        audio = x_t.squeeze().cpu()
+        audio = x_t
         save_sample(root / ("original_%d.wav" % i), main_sample_rate, audio)
-        writer.add_audio("original/sample_%d.wav" % i, audio, 0, sample_rate=main_sample_rate)
+#        writer.add_audio("original/sample_%d.wav" % i, audio, 0, sample_rate=main_sample_rate)
 
         if i == n_test_samples - 1:
             break
@@ -547,9 +551,11 @@ def main():
         for iterno, x_t in enumerate(train_loader):
             s_t = myMFCC(x_t).detach()
             x_pred_t = netG(s_t)
-
+            
+#            print(x_pred_t.shape)
+#            x_pred_t = pad_to_seq_len(x_pred_t, seq_len)
+#            print(x_pred_t.shape)
             with torch.no_grad():
-                x_pred_t = pad_to_seq_len(x_pred_t, seq_len)
                 s_pred_t = myMFCC(x_pred_t.detach())
                 s_error = F.l1_loss(s_t, s_pred_t).item()
 
@@ -613,7 +619,7 @@ def main():
             netG.zero_grad()
             (loss_G + lambda_feat * loss_feat).backward()
             optG.step()
-            schedulerG.step()
+#            schedulerG.step()
 
             ######################
             # Update tensorboard #
@@ -625,35 +631,37 @@ def main():
             writer.add_scalar("loss/feature_matching", costs[-1][2], steps)
             writer.add_scalar("loss/mel_reconstruction", costs[-1][3], steps)
             steps += 1
-
+                    
             if steps % save_interval == 0:
                 st = time.time()
                 with torch.no_grad():
                     for i, (voc, _) in enumerate(zip(test_voc, test_audio)):
                         pred_audio = netG(voc)
-                        pred_audio = pred_audio.squeeze().cpu()
+                        print(pred_audio)
                         save_sample(root / ("generated_%d.wav" % i), main_sample_rate, pred_audio)
-                        writer.add_audio(
-                            "generated/sample_%d.wav" % i,
-                            pred_audio,
-                            epoch,
-                            sample_rate=main_sample_rate,
-                        )
 
+
+                if np.asarray(costs).mean(0)[-1] < best_mel_reconst:
+                    best_mel_reconst = np.asarray(costs).mean(0)[-1]
+                    
+                    print("New best mel_reconstruction: {}".format(best_mel_reconst))
+                    
+                    torch.save(netD.state_dict(), root / "best_netD.pt")
+                    torch.save(optG.state_dict(), root / "best_optG.pt")
+                    torch.save(optG.state_dict(), root / "best_optD.pt")
+                    torch.save(netG.state_dict(), root / "best_netG.pt")
+                
                 torch.save(netG.state_dict(), root / "netG.pt")
                 torch.save(optG.state_dict(), root / "optG.pt")
 
                 torch.save(netD.state_dict(), root / "netD.pt")
                 torch.save(optD.state_dict(), root / "optD.pt")
 
-                if np.asarray(costs).mean(0)[-1] < best_mel_reconst:
-                    best_mel_reconst = np.asarray(costs).mean(0)[-1]
-                    torch.save(netD.state_dict(), root / "best_netD.pt")
-                    torch.save(netG.state_dict(), root / "best_netG.pt")
-
                 print("\n **Took %5.4fs to generate samples" % (time.time() - st))
                 print("-" * 100)
+                
             mystoi1 = round(mystoi, 3)
+            
             if steps % log_interval == 0:
                 print("mystoi:", mystoi1, "mcd_score:", mcd_score.item(),
                       "Epoch {} | Iters {} / {} | ms/batch {:5.2f} | loss {}".format(
